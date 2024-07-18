@@ -1,176 +1,206 @@
 #include <iostream>
 #include <fstream>
 #include <cmath>
+#include <pulse/simple.h>
 
 #include "vectorlist.h"
-#include "wav.h"
+
+/*  Define the "resolution" of our vector display.  This is the number of points
+ *  that will be used by the line draw method */
+#define XSIZE 200
+#define YSIZE 200
+
+#define AUDIO_FREQUENCY 96000
+#define AMPLITUDE 32767
 
 using namespace std;
 
-WavFile wav;
-
-void line (Point c1, Point c2)
+class VectorScreen
 {
-    #if 0
-    // Ensure x1 < x2
-    if (c1.x() > c2.x())
+private:
+    pa_simple *_pulseAudioHandle;
+    VectorList _list;
+    double _left, _right, _top, _bottom;
+    Point _cursor;
+
+    /*  Draw a line using the DDA algorithm to ensure we output steps along the
+     *  line */
+    void line (Point c1, Point c2)
     {
-        Point tmp = c1;
-        c1 = c2;
-        c2 = tmp;
-    }
-    #endif
+        /*  Scale line endpoint co-ordinates to XSIZE / YSIZE */
+        int x1 = c1.x() * XSIZE - XSIZE / 2;
+        int y1 = c1.y() * YSIZE - YSIZE / 2;
+        int x2 = c2.x() * XSIZE - XSIZE / 2;
+        int y2 = c2.y() * YSIZE - YSIZE / 2;
 
-        int x1 = c1.x() * 200 - 100;
-        int y1 = c1.y() * 200 - 100;
-        int x2 = c2.x() * 200 - 100;
-        int y2 = c2.y() * 200 - 100;
+        int xd = (x2 < x1) ? -1 : 1;
+        int yd = (y2 < y1) ? -1 : 1;
 
-    cout << "line "<<x1<<","<<y1<<","<<x2<<","<<y2<<endl;
-    int xd = (x2 < x1) ? -1 : 1;
-    int yd = (y2 < y1) ? -1 : 1;
+        int err = 0;
 
-    int err = 0;
+        if (y1 == y2)
+            err = -1;
 
-    if (y1 == y2)
-        err = -1;
+        int x = x1;
+        int y = y1;
 
-    int x = x1;
-    int y = y1;
-
-    while (x != x2 || y != y2)
-    {
-        if (err < 0)
+        while (x != x2 || y != y2)
         {
-            x += xd;
-            err += (y2 - y1) * yd;
+            if (err < 0)
+            {
+                x += xd;
+                err += (y2 - y1) * yd;
+            }
+            else
+            {
+                y += yd;
+                err -= (x2 - x1) * xd;
+            }
+
+            /* Create a stereo sample where left channel is X and right channel
+             * is Y.  Scale up the value to the amplitude.  Write 4 bytes to
+             * pulse */
+            int16_t sample[2];
+            sample[0] = x * AMPLITUDE / XSIZE;
+            sample[1] = y * AMPLITUDE / YSIZE;
+            pa_simple_write (_pulseAudioHandle, (uint8_t*)sample, 4, NULL);
         }
-        else
+    }
+
+    /*  Find a point on a line from c0 to c1 where t is from 0.0 to 1.0 */
+    Point linePoint (Point c0, Point c1, double t)
+    {
+        int x = (c1.x() - c0.x()) * t + c0.x();
+        int y = (c1.y() - c0.y()) * t + c0.y();
+        return Point (x,y);
+    }
+
+    /*  Curves are assumed to be cubic Bezier only, see
+     *  https://en.wikipedia.org/wiki/B%C3%A9zier_curve#Higher-order_curves */
+    void cubicBezier (Point c0, Point c1, Point c2, Point c3)
+    {
+        for (double t = 0; t < 1.0; t += 0.1)
         {
-            y += yd;
-            err -= (x2 - x1) * xd;
+            Point p0 = linePoint (c0, c1, t);
+            Point p1 = linePoint (c1, c2, t);
+            Point p2 = linePoint (c2, c3, t);
+
+            Point q0 = linePoint (p0, p1, t);
+            Point q1 = linePoint (p1, p2, t);
+
+            Point p = linePoint (q0, q1, t);
+            _list.add (_cursor, p);
+            _cursor = p;
         }
-
-        cout << x << "," << y << endl ;
-        wav.writeSample (x*320, y*320);
     }
-}
 
-Point linePoint (Point c0, Point c1, double t)
-{
-    int x = (c1.x() - c0.x()) * t + c0.x();
-    int y = (c1.y() - c0.y()) * t + c0.y();
-    return Point (x,y);
-}
-
-void cubicBezier (VectorList& list, Point c0, Point c1, Point c2, Point c3)
-{
-    Point cursor = c0;
-
-    for (double t = 0; t < 1.0; t += 0.1)
+public:
+    void draw ()
     {
-        Point p0 = linePoint (c0, c1, t);
-        Point p1 = linePoint (c1, c2, t);
-        Point p2 = linePoint (c2, c3, t);
-
-        Point q0 = linePoint (p0, p1, t);
-        Point q1 = linePoint (p1, p2, t);
-
-        Point draw = linePoint (q0, q1, t);
-        // line (cursor, draw);
-        // cursor = draw;
-        list.add (cursor, draw);
-        cursor = draw;
+        for (int i = 0; i < _list.count() - 1; i++)
+        {
+            Vector v = _list.get(i);
+            Point p1 (v.begin());
+            Point p2 (v.end());
+            p1.scalex (_left, _right);
+            p1.scaley (_top, _bottom);
+            p2.scalex (_left, _right);
+            p2.scaley (_top, _bottom);
+            line (p1, p2);
+        }
     }
-}
 
-void draw(VectorList& list, double left, double top, double right, double bottom)
-{
-    for (int i = 0; i < list.count() - 1; i++)
+    void limits (string& line)
     {
-        Vector v = list.get(i);
-        Point p1 (v.begin());
-        Point p2 (v.end());
-        cout<<"xrange "<<left<<","<<right<<endl;
-        cout<<"p1x "<<p1.x() << "->" ;
-        p1.scalex (left, right);
-        cout << p1.x() << endl;
-        cout<<"p1y "<<p1.y() << "->" ;
-        p1.scaley (top, bottom);
-        cout << p1.y() << endl;
-        p2.scalex (left, right);
-        p2.scaley (top, bottom);
-        line (p1, p2);
+        sscanf (line.c_str(), "S %lf,%lf %lf,%lf", &_left, &_top, &_right, &_bottom);
+        cout << "scale "<< _left<<","<<_top<< " "<<_right<<","<<_bottom<<endl;
     }
 
-    //    line (list.get(i), list.get(i+1));
+    void move (string& line)
+    {
+        double x1,y1;
+        sscanf (line.c_str(), "M %lf,%lf", &x1, &y1);
+        cout << "move "<< x1<<","<<y1<<endl;
+        _cursor = Point (x1, y1);
+    }
 
-    //line (list.get(list.count() - 1), list.get(0));
-}
+    void curve (string& line)
+    {
+        double x1,y1,x2,y2,x3,y3;
+        sscanf (line.c_str(), "C %lf,%lf %lf,%lf %lf,%lf", &x1, &y1, &x2,
+                            &y2, &x3, &y3);
+        cout << "curve "<< x1<<","<<y1<< " "<<x2<<","<<y2<<" "<< x3<<","<<y3<<endl;
+        cubicBezier (_cursor, Point (x1, y1), Point (x2, y2), Point (x3, y3));
+        _cursor = Point (x3, y3);
+    }
+
+    void line (string& line)
+    {
+        double x1,y1;
+        sscanf (line.c_str(), "L %lf,%lf", &x1, &y1);
+        cout << "line "<< x1<<","<<y1<< endl;
+        _list.add (Vector (_cursor, Point (x1, y1)));
+        _cursor = Point (x1, y1);
+    }
+
+    bool pulseOpen ()
+    {
+        static pa_sample_spec pulseAudioSpec;
+
+        pulseAudioSpec.format = PA_SAMPLE_S16NE;
+        pulseAudioSpec.channels = 2;
+        pulseAudioSpec.rate = AUDIO_FREQUENCY;
+
+        _pulseAudioHandle = pa_simple_new(NULL,               // Use the default server.
+                          "Vector audio",           // Our application's name.
+                          PA_STREAM_PLAYBACK,
+                          NULL,               // Use the default device.
+                          "Games",            // Description of our stream.
+                          &pulseAudioSpec,                // Our sample format.
+                          NULL,               // Use default channel map
+                          NULL,               // Use default buffering attributes.
+                          NULL               // Ignore error code.
+                          );
+
+        return _pulseAudioHandle != nullptr;
+    }
+};
 
 int main(int argc, char *argv[])
 {
-    if (argc < 3)
+    if (argc < 2)
     {
-        cerr << "Usage: "<<argv[0]<< " <in-file> <out-file>"<<endl;
+        cerr << "Usage: "<<argv[0]<< " <in-file>"<<endl;
         return 1;
     }
 
-    wav.openWrite (argv[2], 16, 2);
+    VectorScreen screen;
+
+    if (!screen.pulseOpen())
+    {
+        cerr << "Pulse audio init problem" << endl;
+        return 1;
+    }
+
     ifstream in (argv[1], ifstream::in);
 
     string line;
-    Point cursor;
-    VectorList list;
-    double left, right, top, bottom;
 
     while (getline (in, line))
     {
-        double x1,y1,x2,y2,x3,y3;
         switch (line[0])
         {
-        case 'S':
-            sscanf (line.c_str(), "S %lf,%lf %lf,%lf", &left, &top, &right, &bottom);
-            cout << "scale "<< left<<","<<top<< " "<<right<<","<<bottom<<endl;
-            break;
-        case 'M':
-            sscanf (line.c_str(), "M %lf,%lf", &x1, &y1);
-            cout << "move "<< x1<<","<<y1<<endl;
-            cursor = Point (x1, y1);
-            break;
-        case 'C':
-            sscanf (line.c_str(), "C %lf,%lf %lf,%lf %lf,%lf", &x1, &y1, &x2,
-                                &y2, &x3, &y3);
-            cout << "curve "<< x1<<","<<y1<< " "<<x2<<","<<y2<<" "<< x3<<","<<y3<<endl;
-            cubicBezier (list, cursor, Point (x1, y1), Point (x2, y2), Point (x3, y3));
-            cursor = Point (x3, y3);
-            break;
-        case 'L':
-            sscanf (line.c_str(), "L %lf,%lf", &x1, &y1);
-            cout << "line "<< x1<<","<<y1<< endl;
-            list.add (Vector (cursor, Point (x1, y1)));
-            cursor = Point (x1, y1);
-            break;
+        case 'S': screen.limits (line); break;
+        case 'M': screen.move (line); break;
+        case 'C': screen.curve (line); break;
+        case 'L': screen.line (line); break;
         default: cout << "huh"<<endl; break;
         }
     }
 
-    for (int i = 0; i < 1000; i++)
-    draw(list, left, top, right, bottom);
-    #if 0
-    for (double angle = 0; angle < 2 * M_PI; angle += 0.01)
-    {
-        int scale = 100;
-        points.clear();
-        points.add (scale * cos(angle), scale * sin(angle));
-        points.add (scale * cos(angle+M_PI/2), scale * sin(angle+M_PI/2));
-        points.add (scale * cos(angle+M_PI), scale * sin(angle+M_PI));
-        points.add (scale * cos(angle+3*M_PI/2), scale * sin(angle+3*M_PI/2));
-        draw();
-    }
-    #endif
+    while (1)
+        screen.draw ();
 
-    wav.close();
     return 0;
 }
 

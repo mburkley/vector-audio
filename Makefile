@@ -1,16 +1,11 @@
 SUFFIXES+=.d
 
-OBJECTS=draw.o \
-wav.o 
+OBJECTS=draw.o 
 
 LIBS=\
--l glut\
--l GL\
 -lpulse-simple\
 -lpulse\
--lreadline \
--lm \
--lfuse3
+-lm 
 
 CFLAGS=-Wall -ggdb3
 # LDFLAGS=
